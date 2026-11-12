@@ -11,7 +11,8 @@ and it never loosens a shared rule.
 
 ## Layout
 
-- `apps/web`: the Next.js app, one route segment per locale (`es`, `en`).
+- `apps/web`: the Next.js app, one route segment per locale (`es`, `en`; default `es`).
+- `apps/web/src/proxy.ts` routes locales; `apps/web/messages` holds every string.
 - `apps/web/src/shared/config/app-name.ts`: the app's visible name.
 - `themis.config.mjs`: this body's data for the class configuration.
 
@@ -31,7 +32,6 @@ pnpm themis <verb>  the Themis CLI (ci, hook, references, skills, ...)
 ## Rules
 
 Until path-scoped agent rules exist in a folder under .claude, this file is all.
-
 ## Git flow
 
 `develop` is the default branch and takes `type/*` branches by squash; `main`
