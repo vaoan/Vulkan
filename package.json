@@ -2,9 +2,9 @@
   "name": "vulkan",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@11.28.11",
+  "packageManager": "pnpm@12.18.0",
   "engines": {
-    "node": ">=24"
+    "node": "^26"
   },
   "scripts": {
     "dev": "pnpm --filter web dev",
@@ -21,7 +21,7 @@
     "eslint": "^9.39.5",
     "husky": "^9.1.7",
     "tailwindcss": "^4.3.5",
-    "typescript": "^6.0.3",
+    "typescript": "~6.0.3",
     "vitest": "^5.1.0"
   }
 }
