@@ -1,0 +1,8 @@
+{
+  "header": {
+    "signIn": "Iniciar sesión"
+  },
+  "home": {
+    "title": "{appName}, el punto de partida"
+  }
+}
