@@ -11,9 +11,9 @@ and it never loosens a shared rule.
 
 ## Layout
 
-- `apps/web`: the Next.js app, one route segment per locale (`es`, `en`; default `es`).
-- `apps/web/src/proxy.ts` routes locales; `apps/web/messages` holds every string.
-- `apps/web/src/shared/config/app-name.ts`: the app's visible name.
+- `apps/web`: the Next.js app; `src/proxy.ts` routes the locales (`es` default, `en`).
+- `apps/web/messages` holds every string; `apps/web/src/shared/config/app-name.ts` the name.
+- `supabase/`: migrations, pgTAP tests; `current_user_id()` is the Clerk person; RLS everywhere.
 - `themis.config.mjs`: this body's data for the class configuration.
 
 ## Commands
@@ -25,7 +25,7 @@ pnpm build        build the web app
 pnpm lint         eslint with the class configuration, zero warnings
 pnpm typecheck    tsc over every app and package
 pnpm test         vitest
-pnpm test:db      database tests (a placeholder until Supabase is added)
+pnpm test:db      pgTAP tests in supabase/tests (needs Docker and `pnpm supabase start`)
 pnpm themis <verb>  the Themis CLI (ci, hook, references, skills, ...)
 ```
 
