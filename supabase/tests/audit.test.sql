@@ -2,7 +2,7 @@
 -- person can be anonymised out of it. Everything runs in one transaction and is rolled back.
 begin;
 
-select plan(14);
+select plan(18);
 
 insert into public.user_profiles (id, identity_sub) values
   ('00000000-0000-4000-8000-00000000000a', 'user_a'),
@@ -33,6 +33,12 @@ select ok(
   'only service_role (and the owner) may call audit.anonymise_user'
 );
 
+select ok(
+  not has_function_privilege('authenticated', 'audit.enable_tracking(regclass)', 'execute')
+  and not has_function_privilege('anon', 'audit.enable_tracking(regclass)', 'execute'),
+  'anon and authenticated cannot call audit.enable_tracking'
+);
+
 -- Each writer leaves exactly one row. The count is taken as the owner, between calls.
 create temporary table seen (n int) on commit drop;
 insert into seen select count(*) from audit.logged_actions;
@@ -53,6 +59,14 @@ select is(
   (select user_id from audit.logged_actions order by event_id desc limit 1),
   '00000000-0000-4000-8000-00000000000a'::uuid,
   'the row records who granted'
+);
+
+select ok(
+  (select old_data is null
+      and new_data ->> 'user_id' = '00000000-0000-4000-8000-00000000000b'
+      and new_data -> 'capabilities' = '["edit", "manage-delegates"]'::jsonb
+    from audit.logged_actions order by event_id desc limit 1),
+  'a first grant is logged as an insert with the new delegation as new_data'
 );
 
 update seen set n = (select count(*) from audit.logged_actions);
@@ -81,6 +95,14 @@ select is(
   'a revoke leaves one audit row'
 );
 
+select ok(
+  (select action_type = 'UPDATE'
+      and old_data -> 'capabilities' = '["edit", "manage-delegates"]'::jsonb
+      and new_data -> 'capabilities' = '["manage-delegates"]'::jsonb
+    from audit.logged_actions order by event_id desc limit 1),
+  'a partial revoke is logged with the capabilities before and after'
+);
+
 update seen set n = (select count(*) from audit.logged_actions);
 select set_config('request.jwt.claims', '{"sub":"user_a","role":"authenticated"}', true);
 set local role authenticated;
@@ -94,6 +116,15 @@ select is(
   'revoking everything is logged as the delegation''s deletion'
 );
 
+-- Before the transfer, D (the next owner) holds read and B holds edit and manage-delegates.
+select set_config('request.jwt.claims', '{"sub":"user_a","role":"authenticated"}', true);
+set local role authenticated;
+select public.grant_capabilities('notes', '90000000-0000-4000-8000-000000000001',
+  '00000000-0000-4000-8000-00000000000d', array['read']);
+select public.grant_capabilities('notes', '90000000-0000-4000-8000-000000000001',
+  '00000000-0000-4000-8000-00000000000b', array['edit']);
+reset role;
+
 update seen set n = (select count(*) from audit.logged_actions);
 select set_config('request.jwt.claims', '{"sub":"user_a","role":"authenticated"}', true);
 set local role authenticated;
@@ -103,8 +134,8 @@ reset role;
 
 select is(
   (select count(*)::int from audit.logged_actions) - (select n from seen),
-  1,
-  'a transfer leaves one audit row'
+  3,
+  'a transfer logs the owner change and one row per delegation it changes: the new owner''s removed, B''s stripped'
 );
 
 -- Anonymising B. Control first: B really is in the log, as actor and inside row data.
@@ -131,9 +162,15 @@ select throws_ok(
 );
 reset role;
 
+select set_config('test.expected',
+  pg_temp.rows_with('00000000-0000-4000-8000-00000000000b')::text, true);
 select set_config('request.jwt.claims', '{"role":"service_role"}', true);
 set local role service_role;
-select audit.anonymise_user('00000000-0000-4000-8000-00000000000b');
+select is(
+  audit.anonymise_user('00000000-0000-4000-8000-00000000000b'),
+  current_setting('test.expected')::bigint,
+  'anonymise_user returns the number of rows it changed'
+);
 reset role;
 
 select is(

@@ -142,13 +142,16 @@ create function public.has_capability(resource_type text, resource_id uuid, capa
             and has_capability.capability = any (d.capabilities)
         )
     from public.resources r
+    join public.resource_types t on t.key = r.type
     cross join (select public.current_user_id() as id) me
     where r.type = resource_type and r.id = resource_id and me.id is not null
+      -- A capability the type does not offer is held by nobody, so a typo in a policy denies.
+      and has_capability.capability = any (t.capabilities || array['manage-delegates', 'transfer'])
   ), false)
 $$;
 
 comment on function public.has_capability(text, uuid, text) is
-  'True when the caller owns the resource, is an operator, or was delegated the capability on it. False for a resource that does not exist or a caller with no profile.';
+  'True when the caller owns the resource, is an operator, or was delegated the capability on it. False for a resource that does not exist, a capability its type does not offer, or a caller with no profile.';
 
 revoke all on function public.has_capability(text, uuid, text) from public, anon, authenticated;
 grant execute on function public.has_capability(text, uuid, text) to authenticated, service_role;
@@ -187,37 +190,58 @@ declare
   v_owner uuid;
   v_offered text[];
   v_held text[];
+  v_is_operator boolean;
 begin
+  -- Malformed arguments say nothing about the resource, so they are refused first.
+  if grant_capabilities.capabilities is null
+     or cardinality(grant_capabilities.capabilities) = 0
+     or array_position(grant_capabilities.capabilities, null) is not null then
+    raise exception 'capabilities must be a non-empty array with no null element' using errcode = '22023';
+  end if;
+  if grantee_id is null then
+    raise exception 'grantee must be given' using errcode = '22023';
+  end if;
+
+  -- Lock the resource, so ownership cannot move while this grant is decided.
   select r.owner_id, t.capabilities || array['manage-delegates', 'transfer']
   into v_owner, v_offered
   from public.resources r
   join public.resource_types t on t.key = r.type
-  where r.type = resource_type and r.id = resource_id;
+  where r.type = resource_type and r.id = resource_id
+  for update of r;
 
   if v_me is null or v_owner is null then
     raise exception 'not permitted' using errcode = '42501';
   end if;
 
-  if coalesce(cardinality(grant_capabilities.capabilities), 0) = 0
-     or not (grant_capabilities.capabilities <@ v_offered) then
-    raise exception 'type % does not offer every capability in %', resource_type, grant_capabilities.capabilities
-      using errcode = '22023';
+  -- Authorisation before validity: whoever may not grant learns nothing else.
+  v_is_operator := exists (select 1 from public.operators o where o.user_id = v_me);
+  if v_owner <> v_me and not v_is_operator then
+    select d.capabilities into v_held
+    from public.resource_delegates d
+    where d.type = resource_type and d.id = resource_id and d.user_id = v_me;
+
+    if v_held is null or not ('manage-delegates' = any (v_held)) then
+      raise exception 'not permitted' using errcode = '42501';
+    end if;
   end if;
 
   if grantee_id = v_me or grantee_id = v_owner then
     raise exception 'nobody grants to themselves or to the owner' using errcode = '42501';
   end if;
 
-  if v_owner <> v_me and not exists (select 1 from public.operators o where o.user_id = v_me) then
-    select d.capabilities into v_held
-    from public.resource_delegates d
-    where d.type = resource_type and d.id = resource_id and d.user_id = v_me;
+  if not exists (select 1 from public.user_profiles p where p.id = grantee_id) then
+    raise exception 'grantee has no profile' using errcode = '22023';
+  end if;
 
-    if v_held is null
-       or not ('manage-delegates' = any (v_held))
-       or not (grant_capabilities.capabilities <@ v_held) then
-      raise exception 'not permitted' using errcode = '42501';
-    end if;
+  if not (grant_capabilities.capabilities <@ v_offered) then
+    raise exception 'type % does not offer every capability in %', resource_type, grant_capabilities.capabilities
+      using errcode = '22023';
+  end if;
+
+  -- A delegate grants only what they hold.
+  if v_held is not null and not (grant_capabilities.capabilities <@ v_held) then
+    raise exception 'not permitted' using errcode = '42501';
   end if;
 
   insert into public.resource_delegates as d (type, id, user_id, capabilities, granted_by)
@@ -244,25 +268,41 @@ create function public.revoke_capabilities(
   set search_path = ''
   as $$
 declare
-  v_me uuid := public.current_user_id();
+  v_held text[];
   v_remaining text[];
 begin
-  if v_me is null or not public.has_capability(resource_type, resource_id, 'manage-delegates') then
+  if revoke_capabilities.capabilities is null
+     or cardinality(revoke_capabilities.capabilities) = 0
+     or array_position(revoke_capabilities.capabilities, null) is not null then
+    raise exception 'capabilities must be a non-empty array with no null element' using errcode = '22023';
+  end if;
+
+  perform 1 from public.resources r
+  where r.type = resource_type and r.id = resource_id
+  for update of r;
+
+  if not found
+     or public.current_user_id() is null
+     or not public.has_capability(resource_type, resource_id, 'manage-delegates') then
     raise exception 'not permitted' using errcode = '42501';
   end if;
 
-  select array(
-    select c from unnest(d.capabilities) c
-    where not (c = any (revoke_capabilities.capabilities))
-    order by c)
-  into v_remaining
+  select d.capabilities into v_held
   from public.resource_delegates d
   where d.type = resource_type and d.id = resource_id and d.user_id = grantee_id
   for update;
 
-  if v_remaining is null then
-    return;
-  elsif cardinality(v_remaining) = 0 then
+  -- A revoke that would change nothing is a mistake, not an event.
+  if v_held is null or not (v_held && revoke_capabilities.capabilities) then
+    raise exception 'the person holds none of %', revoke_capabilities.capabilities using errcode = '22023';
+  end if;
+
+  v_remaining := array(
+    select c from unnest(v_held) c
+    where not (c = any (revoke_capabilities.capabilities))
+    order by c);
+
+  if cardinality(v_remaining) = 0 then
     delete from public.resource_delegates d
     where d.type = resource_type and d.id = resource_id and d.user_id = grantee_id;
   else
@@ -274,28 +314,49 @@ end;
 $$;
 
 comment on function public.revoke_capabilities(text, uuid, uuid, text[]) is
-  'Remove capabilities from a person on a resource; removing the last one removes the delegation. Needs the owner, an operator or manage-delegates.';
+  'Remove capabilities from a person on a resource; removing the last one removes the delegation. Needs the owner, an operator or manage-delegates. Refuses a revoke that would change nothing.';
 
 create function public.transfer_ownership(resource_type text, resource_id uuid, new_owner_id uuid)
   returns void
   language plpgsql security definer
   set search_path = ''
   as $$
+declare
+  v_owner uuid;
+  v_admin constant text[] := array['manage-delegates', 'transfer'];
 begin
-  if public.current_user_id() is null
+  select r.owner_id into v_owner
+  from public.resources r
+  where r.type = resource_type and r.id = resource_id
+  for update of r;
+
+  if v_owner is null
+     or public.current_user_id() is null
      or not public.has_capability(resource_type, resource_id, 'transfer') then
     raise exception 'not permitted' using errcode = '42501';
   end if;
 
   if new_owner_id is null
-     or exists (select 1 from public.resources r
-                where r.type = resource_type and r.id = resource_id and r.owner_id = new_owner_id) then
+     or not exists (select 1 from public.user_profiles p where p.id = new_owner_id) then
+    raise exception 'new owner has no profile' using errcode = '22023';
+  end if;
+
+  if new_owner_id = v_owner then
     raise exception 'the resource already belongs to that person' using errcode = '22023';
   end if;
 
   -- The new owner holds everything; a delegation they had would only go stale.
   delete from public.resource_delegates d
   where d.type = resource_type and d.id = resource_id and d.user_id = new_owner_id;
+
+  -- The other delegates keep their working capabilities and lose the admin ones: the new owner
+  -- decides who manages and who may give the resource away.
+  delete from public.resource_delegates d
+  where d.type = resource_type and d.id = resource_id and d.capabilities <@ v_admin;
+
+  update public.resource_delegates d
+  set capabilities = array(select c from unnest(d.capabilities) c where not (c = any (v_admin)) order by c)
+  where d.type = resource_type and d.id = resource_id and d.capabilities && v_admin;
 
   update public.resources r
   set owner_id = new_owner_id
@@ -304,7 +365,7 @@ end;
 $$;
 
 comment on function public.transfer_ownership(text, uuid, uuid) is
-  'Give a resource to another person. Needs the owner, an operator or the transfer capability. The previous owner keeps nothing unless granted afterwards.';
+  'Give a resource to another person. Needs the owner, an operator or the transfer capability. The previous owner keeps nothing unless granted afterwards; the other delegates keep their working capabilities and lose manage-delegates and transfer.';
 
 revoke all on function public.grant_capabilities(text, uuid, uuid, text[]) from public, anon, authenticated;
 revoke all on function public.revoke_capabilities(text, uuid, uuid, text[]) from public, anon, authenticated;

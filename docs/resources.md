@@ -73,15 +73,25 @@ functions are the only writers, and each change lands in `audit.logged_actions`:
   capability the type offers; a delegate holding `manage-delegates` grants only what they hold.
   Nobody grants to themselves or to the owner.
 - `revoke_capabilities(type, id, user_id, capabilities)`: the owner, an operator or a holder of
-  `manage-delegates`. Revoking a person's last capability removes their delegation.
+  `manage-delegates`. Revoking a person's last capability removes their delegation. A revoke that
+  would change nothing (no delegation, or none of the named capabilities held) is refused.
 - `transfer_ownership(type, id, new_owner_id)`: the owner, an operator or a holder of `transfer`.
-  The previous owner keeps nothing unless someone grants it back.
+  The previous owner keeps nothing unless someone grants it back. The new owner's own delegation
+  is removed. Every other delegate keeps their working capabilities and loses `manage-delegates`
+  and `transfer`; a delegate left with nothing is removed.
+
+Malformed arguments (a null or empty capabilities array, a null element, a grantee with no
+profile, a capability the type does not offer) are refused with `22023`; a caller who may not
+act gets `42501`, whether or not the resource exists.
 
 Operators are added by a migration or by the server with `service_role`.
 
 ## The audit log
 
-`audit.enable_tracking(table)` logs every insert, update and delete of a table. The `audit`
+`audit.enable_tracking(table)` logs every insert, update and delete of a table. A grant or a
+revoke leaves exactly one row. A transfer leaves one row for the owner change plus one for each
+delegation it changes: the new owner's removed, and each delegate stripped of `manage-delegates`
+or `transfer`. The `audit`
 schema is not exposed to the API and no client can read it. To erase a person from the history,
 the server calls `audit.anonymise_user(user_id)`, which replaces their id in every logged row
 with `00000000-0000-0000-0000-000000000000`.
