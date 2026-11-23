@@ -53,6 +53,10 @@ create policy "a person creates only their own profile"
 -- actors: the mirror of the person's actors in AeleOS, keyed on actor_ref.
 -- Fields follow AeleOS docs/integrating.md, "The upsert". The hub never sends who owns a row;
 -- the body records it at sync time, as user_id (whose token made the call) and owner_ref.
+--
+-- Only the server writes this table, with service_role, and only the refs the hub returned for
+-- that person's token. A client only reads its own rows: a writable mirror would let a person
+-- squat another person's actor_ref, or lift their own fursona's suspension.
 -- ---------------------------------------------------------------------------
 create table public.actors (
   actor_ref uuid primary key,
@@ -70,35 +74,26 @@ create table public.actors (
   unique (actor_ref, user_id),
   -- A person is owned by nobody; every other actor is owned by a person.
   constraint actors_owner_shape check ((kind = 'person') = (owner_ref is null)),
-  -- A fursona's owner is a person row of the same user: nobody records a fursona under
-  -- someone else's person, whatever RLS lets them see.
+  -- A fursona's owner is a person row of the same user: nothing records a fursona under
+  -- someone else's person.
   constraint actors_owner_same_user foreign key (owner_ref, user_id)
     references public.actors (actor_ref, user_id) on delete cascade
 );
 
 comment on table public.actors is
-  'Mirror of the person''s AeleOS actors, upserted on actor_ref. The hub wins on its fields.';
+  'Mirror of the person''s AeleOS actors, upserted on actor_ref by the server. The hub wins on its fields.';
 
 create index actors_user_id_idx on public.actors (user_id);
+-- Backs the owner reference, so removing a person finds their fursonas without a scan.
+create index actors_owner_ref_user_id_idx on public.actors (owner_ref, user_id);
+-- The hub sends at most one person per token.
+create unique index actors_one_person_per_user on public.actors (user_id) where kind = 'person';
 
 alter table public.actors enable row level security;
 
 revoke all on public.actors from anon, authenticated;
-grant select, insert, update, delete on public.actors to authenticated;
+grant select on public.actors to authenticated;
 
 create policy "a person reads their own actors"
   on public.actors for select to authenticated
-  using (user_id = public.current_user_id());
-
-create policy "a person records actors only for themselves"
-  on public.actors for insert to authenticated
-  with check (user_id = public.current_user_id());
-
-create policy "a person updates only their own actors, and keeps them"
-  on public.actors for update to authenticated
-  using (user_id = public.current_user_id())
-  with check (user_id = public.current_user_id());
-
-create policy "a person removes only their own actors"
-  on public.actors for delete to authenticated
   using (user_id = public.current_user_id());
